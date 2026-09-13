@@ -195,6 +195,14 @@ class ContentExtractor
 
         $this->logger->debug('HTML after site config strings replacements', ['html' => $html]);
 
+        // Convert WeChat-style math formulas to LaTeX text before Readability:
+        // WeChat official-account articles render formulas as MathJax SVG wrapped
+        // in <span data-formula="..."> nodes. Readability strips those spans and
+        // htmLawed removes the SVG glyphs, silently dropping every formula.
+        if (false !== stripos($html, 'data-formula')) {
+            $html = $this->convertMathFormulaSpansToLatex($html);
+        }
+
         // load and parse html
         $parser = $this->siteConfig->parser();
 
@@ -1088,6 +1096,96 @@ class ContentExtractor
         }
 
         return $readability;
+    }
+
+    /**
+     * Convert WeChat-style math formulas into plain LaTeX text.
+     *
+     * WeChat official-account articles (e.g. those authored with mdnice) render
+     * each formula as a MathJax SVG wrapped in a node such as:
+     *
+     *   <span role="presentation" data-formula="S_T"
+     *         data-formula-type="inline-equation"><svg>…</svg></span>
+     *
+     * The Readability cleanup unwraps/removes those spans and the htmLawed XSS
+     * filter strips the SVG glyphs, so every formula silently disappears from
+     * the extracted content. The LaTeX source is kept in the `data-formula`
+     * attribute, so we replace the whole node with a plain text node wrapped
+     * in \( … \) (inline) or \[ … \] (block) delimiters, which both survive
+     * the extraction pipeline and are rendered by MathJax-compatible readers
+     * (such as wallabag's).
+     *
+     * Applied on the raw HTML string before parsing: gated on the presence of
+     * a `data-formula` attribute so non-WeChat pages are untouched.
+     *
+     * @param string $html
+     *
+     * @return string
+     */
+    private function convertMathFormulaSpansToLatex($html)
+    {
+        $doc = new \DOMDocument();
+
+        $libxmlPrevious = libxml_use_internal_errors(true);
+        libxml_clear_errors();
+
+        // The XML prolog forces libxml to treat the document as UTF-8.
+        // It is removed after loading so it does not leak into the output.
+        $loaded = $doc->loadHTML('<?xml encoding="UTF-8">' . $html);
+
+        $parseErrors = libxml_get_errors();
+        libxml_clear_errors();
+        libxml_use_internal_errors($libxmlPrevious);
+
+        if (!$loaded) {
+            $this->logger->info('Failed to parse HTML for math formula conversion, keeping original content');
+
+            return $html;
+        }
+
+        foreach (iterator_to_array($doc->childNodes) as $child) {
+            if ($child instanceof \DOMProcessingInstruction) {
+                $doc->removeChild($child);
+            }
+        }
+
+        $xpath = new \DOMXPath($doc);
+        $formulaNodes = $xpath->query('//*[@data-formula]');
+
+        if (false === $formulaNodes || 0 === $formulaNodes->length) {
+            return $html;
+        }
+
+        $converted = 0;
+        foreach (iterator_to_array($formulaNodes) as $node) {
+            if (!$node instanceof \DOMElement || null === $node->parentNode) {
+                continue;
+            }
+
+            $latex = trim($node->getAttribute('data-formula'));
+            if ('' === $latex) {
+                continue;
+            }
+
+            $isBlock = 'block-equation' === $node->getAttribute('data-formula-type');
+            $delimiter = $isBlock ? ['\\[', '\\]'] : ['\\(', '\\)'];
+
+            $node->parentNode->replaceChild(
+                $doc->createTextNode($delimiter[0] . $latex . $delimiter[1]),
+                $node
+            );
+            ++$converted;
+        }
+
+        if (0 === $converted) {
+            return $html;
+        }
+
+        $this->logger->info('Math formula spans converted to LaTeX text', ['count' => $converted]);
+
+        // Keep the full document (head/title included) so downstream title
+        // extraction keeps working; Readability accepts a whole page.
+        return (string) $doc->saveHTML($doc->documentElement);
     }
 
     /**

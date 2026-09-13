@@ -53,6 +53,47 @@ class ContentExtractorTest extends TestCase
         ];
     }
 
+    public function testWeChatMathFormulaSpansConvertedToLatex(): void
+    {
+        $html = <<<'HTML'
+<html><head><title>公式文章</title></head><body>
+<div id="js_content">
+<p>设到期股价为 <span role="presentation" data-formula="S_T" data-formula-type="inline-equation"><svg xmlns="http://www.w3.org/2000/svg"></svg></span>，执行价为 <span role="presentation" data-formula="K" data-formula-type="inline-equation"><svg xmlns="http://www.w3.org/2000/svg"></svg></span>。初始期权费为 <span role="presentation" data-formula="C_0" data-formula-type="inline-equation"><svg xmlns="http://www.w3.org/2000/svg"></svg></span>。</p>
+<p>一份现金结算的欧式看涨期权，到期支付为</p>
+<p><span role="presentation" data-formula="g(S_T)=(S_T-K)^+=\max\{S_T-K,0\}" data-formula-type="block-equation"><svg xmlns="http://www.w3.org/2000/svg"></svg></span></p>
+<p>忽略利息与费用，买方持有至到期的利润为</p>
+<p><span role="presentation" data-formula="\Pi_T^{\mathrm{long}}=(S_T-K)^+-C_0" data-formula-type="block-equation"><svg xmlns="http://www.w3.org/2000/svg"></svg></span></p>
+<p>以上就是全部公式内容。这里补充一些正文文字，确保 Readability 能够正确识别内容区域并进行评分，从而把 js_content 中的正文完整提取出来。</p>
+</div>
+</body></html>
+HTML;
+
+        $contentExtractor = new ContentExtractor(self::$contentExtractorConfig);
+        $contentExtractor->process($html, 'https://mp.weixin.qq.com/s/fixture');
+
+        $this->assertSame('公式文章', $contentExtractor->getTitle());
+
+        $content = (string) $contentExtractor->getContent();
+        $this->assertStringContainsString('\(S_T\)', $content);
+        $this->assertStringContainsString('\(K\)', $content);
+        $this->assertStringContainsString('\(C_0\)', $content);
+        $this->assertStringContainsString('\[g(S_T)=(S_T-K)^+=\max\{S_T-K,0\}\]', $content);
+        $this->assertStringContainsString('\[\Pi_T^{\mathrm{long}}=(S_T-K)^+-C_0\]', $content);
+        $this->assertStringNotContainsString('data-formula', $content);
+        $this->assertStringNotContainsString('<svg', $content);
+    }
+
+    public function testHtmlWithoutMathFormulasIsUntouched(): void
+    {
+        $html = '<html><head><title>普通文章</title></head><body><div id="content"><p>没有任何公式的普通文章内容。</p></div></body></html>';
+
+        $contentExtractor = new ContentExtractor(self::$contentExtractorConfig);
+        $contentExtractor->process($html, 'https://example.com/article');
+
+        $this->assertSame('普通文章', $contentExtractor->getTitle());
+        $this->assertStringContainsString('没有任何公式的普通文章内容。', (string) $contentExtractor->getContent());
+    }
+
     /**
      * Test if fingerprints are well extract from meta node.
      *
