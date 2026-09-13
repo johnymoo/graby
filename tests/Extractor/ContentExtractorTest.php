@@ -58,22 +58,26 @@ class ContentExtractorTest extends TestCase
         $html = <<<'HTML'
 <html><head><title>公式文章</title></head><body>
 <div id="js_content">
-<p>设到期股价为 <span role="presentation" data-formula="S_T" data-formula-type="inline-equation"><svg xmlns="http://www.w3.org/2000/svg"></svg></span>，执行价为 <span role="presentation" data-formula="K" data-formula-type="inline-equation"><svg xmlns="http://www.w3.org/2000/svg"></svg></span>。初始期权费为 <span role="presentation" data-formula="C_0" data-formula-type="inline-equation"><svg xmlns="http://www.w3.org/2000/svg"></svg></span>。</p>
+<p>假设有一天，你获得了一项超能力：能准确预测一只股票明天收盘时会涨还是会跌。但这项服务采用了当代互联网最先进的商业模式，基础版只告诉你方向，具体涨多少，需要另行订阅。今天，这只股票的价格是100元。超能力告诉你：明天会上涨。设到期股价为 <span role="presentation" data-formula="S_T" data-formula-type="inline-equation"><svg xmlns="http://www.w3.org/2000/svg"></svg></span>，执行价为 <span role="presentation" data-formula="K" data-formula-type="inline-equation"><svg xmlns="http://www.w3.org/2000/svg"></svg></span>。初始期权费为 <span role="presentation" data-formula="C_0" data-formula-type="inline-equation"><svg xmlns="http://www.w3.org/2000/svg"></svg></span>。</p>
+<p>你当然很激动。为了把这份洞察力充分变现，你没有直接买股票，而是花8元买了一张票。票上写着：明天收盘时，股票超过100元的部分，归你；没超过，这张票就作废。为方便记账，我们约定一张票对应一股，直接用现金结算，不涉及真实交易所的合约乘数。第二天，股票涨到了105元。你郑重地打开账户。预测完全正确，股票确实上涨，这张票也确实给你带来了5元。</p>
 <p>一份现金结算的欧式看涨期权，到期支付为</p>
 <p><span role="presentation" data-formula="g(S_T)=(S_T-K)^+=\max\{S_T-K,0\}" data-formula-type="block-equation"><svg xmlns="http://www.w3.org/2000/svg"></svg></span></p>
 <p>忽略利息与费用，买方持有至到期的利润为</p>
 <p><span role="presentation" data-formula="\Pi_T^{\mathrm{long}}=(S_T-K)^+-C_0" data-formula-type="block-equation"><svg xmlns="http://www.w3.org/2000/svg"></svg></span></p>
-<p>以上就是全部公式内容。这里补充一些正文文字，确保 Readability 能够正确识别内容区域并进行评分，从而把 js_content 中的正文完整提取出来。</p>
+<p>市场没有误会你。它只是没有把猜对方向和赚到钱当成同一道题。这张票就是一个简化的欧式看涨期权：它让你获得指定到期日、指定门槛之上的上涨收益。这里的关键不是术语，而是两笔不能混在一起的账：到期收到多少，以及为了收到它，你事先付出了多少。忽略利息与费用，这张票必须等股票涨到108元才刚好回本。这也不是说期权不好，更不是说预测没有用，它只说明知道未来的一部分，不等于买对了表达这个判断的东西。</p>
 </div>
 </body></html>
 HTML;
 
         $contentExtractor = new ContentExtractor(self::$contentExtractorConfig);
-        $contentExtractor->process($html, 'https://mp.weixin.qq.com/s/fixture');
+        $res = $contentExtractor->process($html, 'https://mp.weixin.qq.com/s/fixture');
 
+        $this->assertTrue($res, 'Extraction went well');
         $this->assertSame('公式文章', $contentExtractor->getTitle());
 
-        $content = (string) $contentExtractor->getContent();
+        $contentBlock = $contentExtractor->getContent();
+        $this->assertNotNull($contentBlock);
+        $content = (string) $contentBlock->ownerDocument->saveXML($contentBlock);
         $this->assertStringContainsString('\(S_T\)', $content);
         $this->assertStringContainsString('\(K\)', $content);
         $this->assertStringContainsString('\(C_0\)', $content);
@@ -85,13 +89,26 @@ HTML;
 
     public function testHtmlWithoutMathFormulasIsUntouched(): void
     {
-        $html = '<html><head><title>普通文章</title></head><body><div id="content"><p>没有任何公式的普通文章内容。</p></div></body></html>';
+        $html = <<<'HTML'
+<html><head><title>普通文章</title></head><body>
+<div id="content">
+<p>假设有一天，你获得了一项超能力：能准确预测一只股票明天收盘时会涨还是会跌。但这项服务采用了当代互联网最先进的商业模式，基础版只告诉你方向，具体涨多少，需要另行订阅。今天，这只股票的价格是100元。超能力告诉你：明天会上涨。</p>
+<p>你当然很激动。为了把这份洞察力充分变现，你没有直接买股票，而是花8元买了一张票。票上写着：明天收盘时，股票超过100元的部分，归你；没超过，这张票就作废。为方便记账，我们约定一张票对应一股，直接用现金结算，不涉及真实交易所的合约乘数。第二天，股票涨到了105元。你郑重地打开账户。预测完全正确，股票确实上涨，这张票也确实给你带来了5元。</p>
+<p>市场没有误会你。它只是没有把猜对方向和赚到钱当成同一道题。这张票就是一个简化的欧式看涨期权：它让你获得指定到期日、指定门槛之上的上涨收益。这里的关键不是术语，而是两笔不能混在一起的账：到期收到多少，以及为了收到它，你事先付出了多少。</p>
+</div>
+</body></html>
+HTML;
 
         $contentExtractor = new ContentExtractor(self::$contentExtractorConfig);
-        $contentExtractor->process($html, 'https://example.com/article');
+        $res = $contentExtractor->process($html, 'https://example.com/article');
 
+        $this->assertTrue($res, 'Extraction went well');
         $this->assertSame('普通文章', $contentExtractor->getTitle());
-        $this->assertStringContainsString('没有任何公式的普通文章内容。', (string) $contentExtractor->getContent());
+
+        $contentBlock = $contentExtractor->getContent();
+        $this->assertNotNull($contentBlock);
+        $content = (string) $contentBlock->ownerDocument->saveXML($contentBlock);
+        $this->assertStringContainsString('没有把猜对方向和赚到钱当成同一道题', $content);
     }
 
     /**
