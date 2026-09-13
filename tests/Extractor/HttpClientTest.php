@@ -189,6 +189,77 @@ class HttpClientTest extends TestCase
         $this->assertSame(404, $res['status']);
     }
 
+    public function testFetchWeChatBlockRetriesWithBrowserProfile(): void
+    {
+        $httpMockClient = new HttpMockClient();
+        $httpMockClient->addResponse(new Response(200, ['Content-Type' => 'text/html'], '<html><body>环境异常，点击继续访问</body></html>'));
+        $httpMockClient->addResponse(new Response(200, ['Content-Type' => 'text/html'], '<html><body>real article</body></html>'));
+
+        $http = new HttpClient($httpMockClient, ['wechat_retry_delay' => 0]);
+        $res = $http->fetch('https://mp.weixin.qq.com/s/article-id');
+
+        $this->assertCount(2, $httpMockClient->getRequests());
+        $this->assertSame('GET', $httpMockClient->getRequests()[0]->getMethod());
+        $this->assertSame('GET', $httpMockClient->getRequests()[1]->getMethod(), 'blocked answer must trigger one retry');
+
+        $retry = $httpMockClient->getRequests()[1];
+        $this->assertStringContainsString('Chrome/131', $retry->getHeaderLine('User-Agent'));
+        $this->assertStringContainsString('zh-CN', $retry->getHeaderLine('Accept-Language'));
+        $this->assertSame('https://mp.weixin.qq.com/', $retry->getHeaderLine('Referer'));
+
+        $this->assertSame('<html><body>real article</body></html>', $res['body']);
+        $this->assertSame(200, $res['status']);
+    }
+
+    public function testFetchWeChatBlockGivesUpAfterOneRetry(): void
+    {
+        $httpMockClient = new HttpMockClient();
+        $httpMockClient->addResponse(new Response(200, ['Content-Type' => 'text/html'], '环境异常'));
+        $httpMockClient->addResponse(new Response(200, ['Content-Type' => 'text/html'], '环境异常'));
+
+        $http = new HttpClient($httpMockClient, ['wechat_retry_delay' => 0]);
+        $res = $http->fetch('https://mp.weixin.qq.com/s/article-id');
+
+        $this->assertCount(2, $httpMockClient->getRequests(), 'exactly one retry, no loops');
+        $this->assertSame('环境异常', $res['body'], 'still returns the blocked body when the retry fails too');
+    }
+
+    public function testFetchWeChatBodyMarkerOnOtherHostDoesNotRetry(): void
+    {
+        $httpMockClient = new HttpMockClient();
+        $httpMockClient->addResponse(new Response(200, ['Content-Type' => 'text/html'], 'an article discussing 环境异常 detections'));
+
+        $http = new HttpClient($httpMockClient, ['wechat_retry_delay' => 0]);
+        $res = $http->fetch('https://www.example.com/wechat-checks');
+
+        $this->assertCount(1, $httpMockClient->getRequests(), 'marker outside mp.weixin.qq.com must not trigger a retry');
+        $this->assertSame('an article discussing 环境异常 detections', $res['body']);
+    }
+
+    public function testFetchWeChatCaptchaRedirectTriggersRetry(): void
+    {
+        $httpMockClient = new HttpMockClient();
+        $httpMockClient->addResponse(new Response(200, ['Content-Type' => 'text/html'], ''));
+        $httpMockClient->addResponse(new Response(200, ['Content-Type' => 'text/html'], '<html><body>real article</body></html>'));
+
+        $logger = new Logger('test');
+        $testHandler = new TestHandler();
+        $logger->pushHandler($testHandler);
+
+        $http = new HttpClient($httpMockClient, ['wechat_retry_delay' => 0], $logger);
+
+        // simulate the redirect plugin having followed the CAPTCHA url
+        $reflection = new \ReflectionClass(HttpClient::class);
+        $method = $reflection->getMethod('looksLikeWeChatBlock');
+        $method->setAccessible(true);
+        $this->assertTrue($method->invoke($http, 'https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha', ''));
+
+        $res = $http->fetch('https://mp.weixin.qq.com/s/article-id');
+
+        $this->assertCount(1, $httpMockClient->getRequests(), 'plain 200 without marker or captcha url must not retry');
+        $this->assertSame('', $res['body']);
+    }
+
     public function testWithUrlencodedContentType(): void
     {
         $httpMockClient = new HttpMockClient();

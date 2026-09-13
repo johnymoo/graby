@@ -26,6 +26,20 @@ use Symfony\Component\OptionsResolver\OptionsResolver;
 class HttpClient
 {
     /**
+     * Desktop browser header profile used to retry mp.weixin.qq.com requests
+     * that were answered with the "environment exception" CAPTCHA interstitial
+     * instead of the article. A plain browser profile (no TLS impersonation)
+     * is the proven way past WeChat's environment check, matching what works
+     * with desktop curl. See https://github.com/johnymoo/graby/issues/1.
+     */
+    private const WECHAT_BROWSER_HEADERS = [
+        'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language' => 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Referer' => 'https://mp.weixin.qq.com/',
+    ];
+
+    /**
      * @var array
      */
     private $config;
@@ -78,6 +92,9 @@ class HttpClient
             ],
             // number of redirection allowed until we assume request won't be complete
             'max_redirect' => 10,
+            // seconds to wait before retrying a blocked mp.weixin.qq.com request
+            // (set to 0 in tests to avoid sleeping)
+            'wechat_retry_delay' => 1,
         ]);
 
         $this->config = $resolver->resolve($config);
@@ -201,6 +218,36 @@ class HttpClient
         $effectiveUrl = $url;
         if (null !== $this->responseHistory->getLastRequest()) {
             $effectiveUrl = (string) $this->responseHistory->getLastRequest()->getUri();
+        }
+
+        // WeChat's environment check sometimes answers 200 with a CAPTCHA
+        // interstitial ("环境异常") instead of the article. Retry once with a
+        // plain desktop browser profile, which is enough for the check from
+        // a clean IP. See https://github.com/johnymoo/graby/issues/1.
+        if ('get' === $method && $this->isWeChatHost($url) && $this->looksLikeWeChatBlock($effectiveUrl, (string) $response->getBody())) {
+            $this->logger->warning('WeChat environment check blocked "{url}"; retrying once with a desktop browser profile', ['url' => $url]);
+
+            if ($this->config['wechat_retry_delay'] > 0) {
+                sleep((int) $this->config['wechat_retry_delay']);
+            }
+
+            try {
+                $retryHeaders = self::WECHAT_BROWSER_HEADERS;
+                if (!empty($headers['Cookie'])) {
+                    $retryHeaders['Cookie'] = $headers['Cookie'];
+                }
+
+                $response = $this->client->get($url, $retryHeaders);
+
+                if (null !== $this->responseHistory->getLastRequest()) {
+                    $effectiveUrl = (string) $this->responseHistory->getLastRequest()->getUri();
+                }
+
+                $this->logger->info('WeChat retry for "{url}" returned status {status}', ['url' => $url, 'status' => $response->getStatusCode()]);
+            } catch (\Exception $e) {
+                $this->logger->warning('WeChat retry for "{url}" failed: {error_message}', ['url' => $url, 'error_message' => $e->getMessage()]);
+                // keep the originally blocked response
+            }
         }
 
         $headers = $this->formatHeaders($response);
@@ -581,6 +628,32 @@ class HttpClient
      *
      * @return array
      */
+    /**
+     * Whether the url targets WeChat's official-account article host.
+     *
+     * @param string $url Absolute url
+     */
+    private function isWeChatHost(string $url): bool
+    {
+        $host = parse_url($url, \PHP_URL_HOST);
+
+        return \is_string($host) && 'mp.weixin.qq.com' === strtolower($host);
+    }
+
+    /**
+     * Detect WeChat's "environment exception" CAPTCHA answer: either the body
+     * carries the marker text, or the request was redirected to the CAPTCHA
+     * page.
+     */
+    private function looksLikeWeChatBlock(string $effectiveUrl, string $body): bool
+    {
+        if (false !== stripos($effectiveUrl, 'wappoc_appmsgcaptcha')) {
+            return true;
+        }
+
+        return false !== strpos($body, '环境异常');
+    }
+
     private function formatHeaders(ResponseInterface $response)
     {
         $headers = [];
